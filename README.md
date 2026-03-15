@@ -1,20 +1,42 @@
-Compte rendu RE — ECU Renault EWR20 SH7058 VQ35DE
-Sprint 1 — Reverse Engineering firmware 64810223F121200000.hex
+# Compte rendu RE — ECU Renault EWR20 SH7058 VQ35DE
+## Sprint 1 — Reverse Engineering firmware `64810223F121200000.hex`
 
-1. Contexte et matériel
-ECU cible : Denso EWR20 — Renault Espace IV / Laguna III / Vel Satis — moteur VQ35DE 3.5 V6
-MCU : Hitachi SH7058 (SH-2A, Big-Endian, 1MB FLASH interne)
-Firmware : 64810223F121200000.hex — Intel HEX, base 0x00000400
-Projet ASAP2 : TK_X91_EUR_VC, version 7V4YHZEB2, généré par RB4-ASAP2 GENERATOR (commun Nissan/Renault)
-Outils utilisés : IDA Pro (SH2A, Big-Endian), nisprog v1.05, KKL 449.1
+---
 
-2. Architecture mémoire SH7058
-ZoneAdresseContenuFLASH interne0x00000000–0x000FFFFFCode firmwareRAM interne0xFFFF0000–0xFFFFFFFFVariables runtimeRegistres hardware0xFFFFE000+DMAC, SCI, ATU, PCIOR
+## 1. Contexte et matériel
 
-3. Variables A2L identifiées
-Nom A2LTypeAdresse RAMDescriptionvSEEDUWORD0xFFFFB644Seed 16-bit (KWP standard)vFLASEEDULONG0xFFFFB5F8Seed 32-bit (accès FLASH)tSADTUBYTE0xFFFF44BADélai seed FLASHtSADT_SUBYTE0xFFFF45B0Délai seed sécurité
+**ECU cible :** Denso EWR20 — Renault Espace IV / Laguna III / Vel Satis — moteur VQ35DE 3.5 V6
+**MCU :** Hitachi SH7058 (SH-2A, Big-Endian, 1MB FLASH interne)
+**Firmware :** `64810223F121200000.hex` — Intel HEX, base `0x00000400`
+**Projet ASAP2 :** `TK_X91_EUR_VC`, version `7V4YHZEB2`, généré par `RB4-ASAP2 GENERATOR` (commun Nissan/Renault)
+**Outils utilisés :** IDA Pro (SH2A, Big-Endian), nisprog v1.05, KKL 449.1
 
-4. Hiérarchie des fonctions KWP2000 service 0x27
+---
+
+## 2. Architecture mémoire SH7058
+
+| Zone | Adresse | Contenu |
+|---|---|---|
+| FLASH interne | `0x00000000–0x000FFFFF` | Code firmware |
+| RAM interne | `0xFFFF0000–0xFFFFFFFF` | Variables runtime |
+| Registres hardware | `0xFFFFE000+` | DMAC, SCI, ATU, PCIOR |
+
+---
+
+## 3. Variables A2L identifiées
+
+| Nom A2L | Type | Adresse RAM | Description |
+|---|---|---|---|
+| `vSEED` | UWORD | `0xFFFFB644` | Seed 16-bit (KWP standard) |
+| `vFLASEED` | ULONG | `0xFFFFB5F8` | Seed 32-bit (accès FLASH) |
+| `tSADT` | UBYTE | `0xFFFF44BA` | Délai seed FLASH |
+| `tSADT_S` | UBYTE | `0xFFFF45B0` | Délai seed sécurité |
+
+---
+
+## 4. Hiérarchie des fonctions KWP2000 service 0x27
+
+```
 sub_27BD4  ← point d'entrée principal KWP dispatcher
 │
 ├── sub_29FF8        init hardware PLIOR (K-Line physique)
@@ -31,13 +53,24 @@ sub_27BD4  ← point d'entrée principal KWP dispatcher
 │
 └── sub_31170        construction KEY (bit permutation + EEPROM)
     └── sub_6ED78    driver SCI2 écriture/lecture EEPROM
+```
 
-5. Algorithme SEED — Prouvé par RE
-Source d'entropie
+---
+
+## 5. Algorithme SEED — Prouvé par RE
+
+### Source d'entropie
+
+```
 dword_227A0 = { 0xFFFF9C6C, 0xFFFF9F48 }
-Deux adresses RAM pointant vers des compteurs libres ATU (Advanced Timer Unit) du SH7058 — valeur pseudo-aléatoire dépendant du timing exact de la requête.
-Fonction sub_2848C — Algo seed complet
-cuint16_t compute_seed(uint32_t* timer_struct) {
+```
+
+Deux adresses RAM pointant vers des **compteurs libres ATU** (Advanced Timer Unit) du SH7058 — valeur pseudo-aléatoire dépendant du timing exact de la requête.
+
+### Fonction `sub_2848C` — Algo seed complet
+
+```c
+uint16_t compute_seed(uint32_t* timer_struct) {
     // timer_struct[0] = *(uint32_t*)0xFFFF9C6C
     // timer_struct[1] = *(uint32_t*)0xFFFF9F48
     
@@ -57,19 +90,37 @@ cuint16_t compute_seed(uint32_t* timer_struct) {
 ```
 
 ### Validation des paramètres NVM avant génération seed
+
 ```
 sub_283EC vérifie :
   param[0x1FFF] ∈ {0x00, 0xAA, 0x55}  → type d'accès autorisé
   param[0x1FF0] ∈ {0x00, 0x55, 0xFF}  → type d'accès secondaire
   
 Si OK → appelle sub_2848C → envoie seed via sub_70554
-Paramètres NVM lus avant envoi seed (indexés depuis 0x8A28, stride=3)
-Index NVMValeur (stride=3)Rôle probable0x1FF30x28 (40)seed_param10x1FF40x00seed_param20x1FF50x89seed_param30x1FF60x00seed_param40x1FF70x10seed_param50x1FF80x06seed_param60x1FFF0x00type accès = OK
+```
 
-6. Algorithme KEY — Partiellement RE
-Fonction sub_31170 — Construction de la clé
-La fonction réalise un bit-permutation sur un byte construit depuis les flags de session GBR, combiné avec les paramètres EEPROM externe.
-c// Pseudo-code sub_31170
+### Paramètres NVM lus avant envoi seed (indexés depuis 0x8A28, stride=3)
+
+| Index NVM | Valeur (stride=3) | Rôle probable |
+|---|---|---|
+| `0x1FF3` | `0x28` (40) | seed_param1 |
+| `0x1FF4` | `0x00` | seed_param2 |
+| `0x1FF5` | `0x89` | seed_param3 |
+| `0x1FF6` | `0x00` | seed_param4 |
+| `0x1FF7` | `0x10` | seed_param5 |
+| `0x1FF8` | `0x06` | seed_param6 |
+| `0x1FFF` | `0x00` | type accès = OK |
+
+---
+
+## 6. Algorithme KEY — Partiellement RE
+
+### Fonction `sub_31170` — Construction de la clé
+
+La fonction réalise un **bit-permutation** sur un byte construit depuis les flags de session GBR, combiné avec les paramètres EEPROM externe.
+
+```c
+// Pseudo-code sub_31170
 uint16_t compute_key(session_flags) {
     byte base  = read_eeprom(0x1FBE);   // param EEPROM externe
     byte modif = read_eeprom(0x1FBF);   // param EEPROM externe
@@ -107,11 +158,13 @@ uint16_t compute_key(session_flags) {
 ## 7. Compteur de tentatives — Mécanisme RE
 
 ### Localisation
+
 ```
 sub_27C80 @ 0x27CFC–0x27D0A
 ```
 
 ### Fonctionnement — Système à états, pas compteur numérique
+
 ```
 État RAM (flag volatile) :
   0x00 = premier appel → accès autorisé
@@ -125,6 +178,7 @@ Nombre max de tentatives :
 ```
 
 ### Reset du compteur
+
 ```
 ✅ Flag en RAM volatile → disparaît à la coupure d'alimentation
 ✅ Contact coupé 15 secondes = reset complet
@@ -146,6 +200,7 @@ Nombre max de tentatives :
 ---
 
 ## 9. État de la connexion physique
+
 ```
 ✅ nisprog v1.05 se connecte à l'ECU
 ✅ ECUID: 65155 — ECU répond correctement
@@ -153,9 +208,30 @@ Nombre max de tentatives :
 ✅ KKL 449.1 sur COM3 fonctionne
 ❌ Key non trouvée (3 essais avec keysets Nissan → exceedAttempts)
 ❌ Compteur actuellement bloqué → reset nécessaire
+```
 
-10. Ce qui reste à faire — Sprint 2
-TâchePrioritéMéthodeReset compteur🔴 ImmédiatCouper contact 15 secCapturer seed réel🔴 ImmédiatScript Python + KKLValider stride EEPROM🔴 HauteTester stride 1/3/4 sur ECUTrouver compute_key exact🔴 HauteCapture seed/key + analyse différentielleValider algo seed🟡 MoyenneComparer seed reçu avec formuleIntégrer dans nisprog🟡 MoyenneCréer renault_backend.cTester flash🟢 FinaleAprès validation key
+---
 
-11. Fichiers de référence
-FichierContenu64810223F121200000.hexFirmware EWR20 originalecu.a2lDéfinitions variables ASAP2nisprog.iniConfig connexion COM3, destaddr 0x10testcandidate.pyScript test candidats keycapture_ewr20.pyScript capture seed/key
+## 10. Ce qui reste à faire — Sprint 2
+
+| Tâche | Priorité | Méthode |
+|---|---|---|
+| Reset compteur | 🔴 Immédiat | Couper contact 15 sec |
+| Capturer seed réel | 🔴 Immédiat | Script Python + KKL |
+| Valider stride EEPROM | 🔴 Haute | Tester stride 1/3/4 sur ECU |
+| Trouver compute_key exact | 🔴 Haute | Capture seed/key + analyse différentielle |
+| Valider algo seed | 🟡 Moyenne | Comparer seed reçu avec formule |
+| Intégrer dans nisprog | 🟡 Moyenne | Créer renault_backend.c |
+| Tester flash | 🟢 Finale | Après validation key |
+
+---
+
+## 11. Fichiers de référence
+
+| Fichier | Contenu |
+|---|---|
+| `64810223F121200000.hex` | Firmware EWR20 original |
+| `ecu.a2l` | Définitions variables ASAP2 |
+| `nisprog.ini` | Config connexion COM3, destaddr 0x10 |
+| `testcandidate.py` | Script test candidats key |
+| `capture_ewr20.py` | Script capture seed/key |
