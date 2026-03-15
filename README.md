@@ -235,3 +235,64 @@ Nombre max de tentatives :
 | `nisprog.ini` | Config connexion COM3, destaddr 0x10 |
 | `testcandidate.py` | Script test candidats key |
 | `capture_ewr20.py` | Script capture seed/key |
+
+
+## Fichiers PDF pertinents pour les schémas
+
+Voici les PDFs que tu as partagés classés par pertinence :
+
+---
+
+### 🔴 Critiques — À conserver absolument
+
+| Fichier | Contenu | Pertinence |
+|---|---|---|
+| `0x2848C.pdf` | **Graph flow sub_2848C** — algo seed complet | ⭐⭐⭐⭐⭐ |
+| `83EC-suivante_de_27e76.pdf` | **sub_283EC fin + sub_27E76** — orchestrateur seed + handler 0x27 complet | ⭐⭐⭐⭐⭐ |
+| `27_02.pdf` | **sub_27E76 début** — handler SecurityAccess complet avec tous les params NVM | ⭐⭐⭐⭐⭐ |
+
+---
+
+### 🟡 Importants — Architecture et contexte
+
+| Fichier | Contenu | Pertinence |
+|---|---|---|
+| `6703.pdf` | **XREFs vers sub_92652** — chaîne d'appel sub_92044→sub_9238E→sub_92604 | ⭐⭐⭐⭐ |
+| `86_E7.pdf` | **sub_27BD4 + sub_91F16** — point d'entrée KWP + timer entropie | ⭐⭐⭐⭐ |
+| `0x28470.pdf` | **sub_28470** — memset/cleanup post-seed | ⭐⭐⭐ |
+| `test4.pdf` | **sub_92652** — gestion état session diagnostic | ⭐⭐⭐ |
+| `test5.pdf` | **sub_91F16 + sub_5B904** — init système + timer ATUII | ⭐⭐⭐ |
+
+---
+
+### 🟢 Utiles — Drivers et sous-fonctions
+
+| Fichier | Contenu | Pertinence |
+|---|---|---|
+| `test.pdf` | **sub_27E76 début** — première moitié handler 0x27 | ⭐⭐ |
+| `test5.pdf` | **sub_6F0E8** — driver EEPROM SCI2 (lecture params NVM) | ⭐⭐ |
+
+---
+
+### Schéma synthétique des PDFs
+
+```
+86_E7.pdf          →  sub_27BD4 (entrée)
+    ↓
+27_02.pdf          →  sub_27E76 (handler 0x27 complet)
+test.pdf               params NVM 0x1FF3-0x1FF8
+    ↓
+83EC-suivante.pdf  →  sub_283EC (orchestrateur seed)
+    ↓
+0x2848C.pdf        →  sub_2848C (ALGO SEED ← le plus important)
+    ↓
+0x28470.pdf        →  sub_28470 (cleanup)
+
+6703.pdf           →  chaîne appel diagnostic parallèle
+test4.pdf          →  sub_92652 (état session)
+test5.pdf          →  sub_91F16 (timer entropie ATUII)
+```
+
+---
+
+Les **3 fichiers indispensables** pour reconstituer l'algo complet sont `0x2848C.pdf`, `83EC-suivante_de_27e76.pdf` et `27_02.pdf`. Les autres donnent le contexte architectural mais ne sont pas nécessaires pour implémenter le seed/key.
