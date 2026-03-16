@@ -137,27 +137,23 @@ int verify_key(void) {
 ```
 (received_key ^ stored_key) == 0xFFFF
 ⟺ received_key == stored_key ^ 0xFFFF
-⟺ key = ~seed   (complément bitwise 16-bit)
+⟺ key = ~seed   (complément bitwise 16-bit par paire)
 ```
 
-**La KEY est le complément bitwise du SEED :**
+**La KEY est le complément bitwise du SEED (32-bit, appliqué par paires 16-bit) :**
 
 ```c
-uint16_t compute_key(uint16_t seed) {
-    return seed ^ 0xFFFF;
-    // équivalent : return ~seed & 0xFFFF;
+uint32_t compute_key(uint32_t seed) {
+    return seed ^ 0xFFFFFFFF;
+    // équivalent : return ~seed;
 }
 ```
 
 ### Exemple
 
 ```
-seed reçu  : 0x1234
-key correct : 0x1234 ^ 0xFFFF = 0xEDCB
-
-Dans nisprog après reset compteur :
-setkeys EDCB0000
-runkernel npk_SH7058.bin
+seed reçu  : 0x1234ABCD
+key correct : 0x1234ABCD ^ 0xFFFFFFFF = 0xEDCB5432
 ```
 
 ---
@@ -189,8 +185,8 @@ Nombre max de tentatives :
 ```
 ✅ Flag en RAM volatile → disparaît à la coupure d'alimentation
 ✅ Contact coupé 15 secondes = reset complet
-✅ Débrancher la batterie = reset garanti
-⚠️  ECU actuellement bloqué — reset nécessaire avant tout essai
+✅ Débrancher la batterie (borne -) 30 sec = reset garanti
+⚠️  ECU actuellement bloqué — reset batterie nécessaire avant tout essai
 ```
 
 ---
@@ -207,7 +203,7 @@ Nombre max de tentatives :
 
 ---
 
-## 9. État connexion physique
+## 9. État connexion physique (fin Sprint 1)
 
 ```
 ✅ nisprog v1.05 se connecte à l'ECU
@@ -236,57 +232,238 @@ Nombre max de tentatives :
 
 ---
 
-## 11. Script de test immédiat
+---
+
+## Sprint 2 — Tests physiques KWP2000 & validation SecurityAccess
+
+---
+
+## S2.1 — Résultats des tests de connexion
+
+### Configuration validée
+
+Après analyse des logs nisprog et tests live, la configuration effective confirmée est :
+
+| Paramètre | Valeur | Source |
+|---|---|---|
+| Port | `COM3` | nisprog.ini |
+| Baudrate | 10400 bps | KWP2000 standard |
+| testerid | `0xFC` | Réponse ECU `0x83 0xFC 0x10 0xC1` |
+| destaddr | `0x10` | Confirmé |
+| Interface | KKL 449.1 dumb, MAN_BREAK | dumbopts 0x48 |
+
+> ⚠️ Le `testerid 0xF1` initialement utilisé dans nisprog.ini était incorrect.
+> L'ECU répond systématiquement avec `dest=0xFC` dans ses trames → testerid effectif = `0xFC`.
+
+### Séquence de connexion confirmée
+
+```
+TX:  81 10 FC 81 0E          ← StartCommunication (format fixe, pas C0)
+RX:  83 FC 10 C1 5D 8F 3C   ← KeyBytes 0x5D 0x8F + checksum OK
+```
+
+---
+
+## S2.2 — Découverte : StartSession 0x85 refusée
+
+Tentative d'ouverture de session de programmation `0x10 0x85` :
+
+```
+TX:  C2 10 FC 10 85 63
+RX:  C3 FC 10 7F 10 11 6F   ← NRC 0x11 = serviceNotSupported
+```
+
+**Conclusion : la session 0x85 n'existe pas sur cet ECU EWR20.**
+Le service 0x27 est accessible directement après StartCommunication, sans session préalable.
+
+---
+
+## S2.3 — Capture seed réelle confirmée ✅
+
+Seed capturée en conditions réelles sur l'ECU :
+
+```
+TX:  C2 10 FC 27 01 F6       ← RequestSeed
+RX:  C6 FC 10 67 01 AF 1B 51 DE 33
+```
+
+**La seed est 32-bit** (4 octets) : `0xAF1B51DE`
+
+> Confirmation de la variable A2L `vFLASEED` (ULONG 32-bit) identifiée en Sprint 1.
+> La seed 16-bit `vSEED` n'est pas utilisée pour ce niveau d'accès.
+
+Exemples de seeds capturées :
+
+| Session | Seed | Key calculée (`^ 0xFFFFFFFF`) |
+|---|---|---|
+| 1 | `0x6F9C5E81` | `0x9063A17E` |
+| 2 | `0x81CE7CE8` | `0x7E318317` |
+| 3 | `0xAF1B51DE` | `0x50E4AE21` |
+
+---
+
+## S2.4 — Résultat SendKey : NRC 0x35
+
+```
+TX:  C6 10 FC 27 02 50 E4 AE 21 FE
+RX:  C3 FC 10 7F 27 35 AA   ← NRC 0x35 = exceededNumberOfAttempts
+```
+
+**L'algo key `seed ^ 0xFFFFFFFF` n'a pas pu être validé** — le compteur était bloqué
+à chaque tentative avant même l'évaluation de la clé.
+
+> L'ECU répond NRC 0x35 immédiatement sans évaluer la key → compteur épuisé en RAM.
+> Le reset batterie (borne - débranché 30 sec) est obligatoire avant toute nouvelle tentative.
+
+---
+
+## S2.5 — Mise au point du script Python
+
+### Environnement
+
+- Windows 10 LTS, Python 3.11, `pip install pyserial`
+- Script `test_key_ewr20.py` dans `C:\Users\admin\Desktop\nisprog\nisprog_1.05\`
+
+### Problèmes résolus
+
+| Problème | Cause | Fix |
+|---|---|---|
+| `diag sendreq 27 01` → envoie `0x1B` | nisprog interprète en décimal | Utiliser `0x27` explicitement |
+| RX = écho TX uniquement | KKL dumb loopback non filtré | Lire et jeter `len(TX)` octets avant le RX |
+| StartSession 0x85 → NRC 0x11 | Service inexistant sur EWR20 | Supprimer StartSession, aller direct 0x27 |
+| seed parsée sur 16-bit | Script original incomplet | Parser 4 octets → seed 32-bit |
+| `setkeys` remet à zéro | Format non reconnu par nisprog | `setkeys` sert au kernel uniquement, pas au `diag sendreq` manuel |
+
+### Script final validé (communications OK)
 
 ```python
-# test_key_ewr20.py
-# Après reset compteur (contact coupé 15 sec)
-
+# test_key_ewr20_v5.py
 import serial, time
 
-PORT = 'COM3'
+PORT   = 'COM3'
+TESTER = 0xFC   # confirmé par réponse ECU
+DEST   = 0x10
 
 ser = serial.Serial(port=PORT, baudrate=10400,
                     bytesize=8, parity='N', stopbits=1, timeout=2)
 
 def fast_init():
+    ser.break_condition = False
+    time.sleep(0.300)
     ser.break_condition = True
     time.sleep(0.025)
     ser.break_condition = False
-    time.sleep(0.300)
+    time.sleep(0.025)
 
-def send_recv(data):
-    ser.write(bytes(data))
-    time.sleep(0.1)
+def build(data):
+    header = [0xC0 | len(data), DEST, TESTER]
+    frame  = header + data
+    frame += [sum(frame) & 0xFF]
+    return frame
+
+def send_recv(frame, wait=0.6):
+    ser.flushInput()
+    tx = bytes(frame)
+    ser.write(tx)
+    echo = ser.read(len(tx))   # jeter l'écho KKL dumb
+    time.sleep(wait)
     r = ser.read(64)
-    print("TX: " + bytes(data).hex(' ').upper())
-    print("RX: " + r.hex(' ').upper())
+    print("TX:   " + tx.hex(' ').upper())
+    print("RX:   " + r.hex(' ').upper())
     return r
 
 fast_init()
-time.sleep(0.3)
-send_recv([0xC2, 0x10, 0xF1, 0x10, 0x85, 0x98])  # StartSession
-time.sleep(0.3)
+time.sleep(0.050)
 
-# RequestSeed
-r = send_recv([0xC2, 0x10, 0xF1, 0x27, 0x01, 0xBB])
-for i in range(len(r)-1):
+# StartCommunication
+r = send_recv([0x81, DEST, TESTER, 0x81, (0x81+DEST+TESTER+0x81)&0xFF], wait=0.4)
+if 0xC1 not in r:
+    print("ERREUR StartComm")
+    ser.close()
+    exit()
+print(">>> StartComm OK")
+time.sleep(0.055)
+
+# Guard anti-gaspillage compteur
+# RequestSeed direct (pas de StartSession)
+r = send_recv(build([0x27, 0x01]), wait=0.6)
+
+for i in range(len(r)-2):
+    if r[i] == 0x7F and r[i+1] == 0x27:
+        nrc = r[i+2]
+        if nrc == 0x35:
+            print("COMPTEUR BLOQUÉ — débrancher batterie (borne -) 30 sec")
+        elif nrc == 0x22:
+            print("CONDITIONS NON REMPLIES")
+        else:
+            print("NRC reçu : %02X" % nrc)
+        ser.close()
+        exit()
+
+for i in range(len(r) - 5):
     if r[i] == 0x67 and r[i+1] == 0x01:
-        seed = (r[i+2] << 8) | r[i+3]
-        key  = seed ^ 0xFFFF
-        print("\n>>> SEED = 0x%04X" % seed)
-        print(">>> KEY  = 0x%04X" % key)
-        print(">>> nisprog: setkeys %04X0000" % key)
+        seed_hi = (r[i+2] << 8) | r[i+3]
+        seed_lo = (r[i+4] << 8) | r[i+5]
+        key_hi  = seed_hi ^ 0xFFFF
+        key_lo  = seed_lo ^ 0xFFFF
 
-        # SendKey
-        time.sleep(0.1)
-        send_recv([0xC3, 0x10, 0xF1, 0x27, 0x02,
-                   (key>>8)&0xFF, key&0xFF,
-                   (0xC3+0x10+0xF1+0x27+0x02+(key>>8)+(key&0xFF))&0xFF])
+        print("\n>>> SEED = 0x%04X%04X" % (seed_hi, seed_lo))
+        print(">>> KEY  = 0x%04X%04X" % (key_hi, key_lo))
+
+        time.sleep(0.055)
+        r2 = send_recv(build([0x27, 0x02,
+                              (key_hi>>8)&0xFF, key_hi&0xFF,
+                              (key_lo>>8)&0xFF, key_lo&0xFF]), wait=0.6)
+
+        if 0x67 in r2 and 0x02 in r2:
+            print("\n✓ SecurityAccess ACCORDÉ !")
+        else:
+            print("\n✗ Clé refusée")
+            for j in range(len(r2)-2):
+                if r2[j] == 0x7F:
+                    print("NRC: %02X" % r2[j+2])
         break
+else:
+    print("ERREUR: pas de seed dans la réponse")
 
 ser.close()
 ```
+
+---
+
+## S2.6 — État fin Sprint 2
+
+```
+✅ Connexion KWP2000 stable et reproductible
+✅ StartCommunication OK — KeyBytes 0x5D 0x8F
+✅ Seed 32-bit capturée sur 3 sessions différentes
+✅ Script Python fonctionnel (écho filtré, seed 32-bit, guard NRC)
+✅ testerid 0xFC confirmé (pas 0xF1)
+✅ Session 0x85 inutile — 0x27 accessible en session default
+⚠️  Algo key `seed ^ 0xFFFFFFFF` non validé — compteur bloqué à chaque tentative
+⏳ Action requise : débrancher borne (-) batterie 30 sec → relancer script
+```
+
+---
+
+## S2.7 — Plan d'action Sprint 3
+
+| Tâche | Priorité | Méthode |
+|---|---|---|
+| Reset compteur batterie | 🔴 Immédiat | Débrancher borne (-) 30 sec |
+| Valider `key = seed ^ 0xFFFFFFFF` | 🔴 Immédiat | Lancer `test_key_ewr20_v5.py` |
+| Si 0x67 0x02 → lancer kernel | 🔴 Immédiat | `runkernel npk_SH7058.bin` via nisprog |
+| Si key refusée → analyser algo `sub_31170` | 🟡 Haute | RE IDA — bit permutation + EEPROM params |
+| Dump ROM complet | 🟡 Haute | `dumpmem rom.bin 0 0` après kernel OK |
+| Valider algo seed mathématique | 🟡 Moyenne | Comparer seeds capturées avec formule `sub_2848C` |
+| Intégrer dans nisprog | 🟢 Finale | Créer `renault_backend.c` |
+| Flash ROM modifié | 🟢 Finale | Après validation dump complet |
+
+---
+
+## 11. Script de test — version finale Sprint 2
+
+Voir section S2.5 — `test_key_ewr20_v5.py`
 
 ---
 
@@ -296,8 +473,8 @@ ser.close()
 |---|---|
 | `64810223F121200000.hex` | Firmware EWR20 original |
 | `ecu.a2l` | Définitions variables ASAP2 |
-| `nisprog.ini` | Config COM3, destaddr 0x10 |
-| `test_key_ewr20.py` | Script capture + test key automatique |
+| `nisprog.ini` | Config COM3, testerid 0xFC, destaddr 0x10 |
+| `test_key_ewr20_v5.py` | Script capture + test key (version finale Sprint 2) |
 | `testcandidate.py` | Script test candidats key |
 
 ---
